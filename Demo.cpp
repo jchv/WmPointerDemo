@@ -1,120 +1,5 @@
-#include <windows.h>
-#include <windowsx.h>
-#include <fmt/core.h>
-#include <string>
-
-constexpr int g_ThrottleMilliseconds = 500;
-
-#ifdef UNICODE
-#include <locale>
-
-std::wstring ToWinString(std::string_view utf8)
-{
-	const int utf8Length = static_cast<int>(utf8.length());
-	std::wstring utf16;
-	if (utf8.empty())
-	{
-		return utf16;
-	}
-	constexpr DWORD kFlags = MB_ERR_INVALID_CHARS;
-	const int utf16Length = ::MultiByteToWideChar(
-		CP_UTF8,
-		kFlags,
-		utf8.data(),
-		utf8Length,
-		nullptr,
-		0
-	);
-	if (utf16Length == 0)
-	{
-		return utf16;
-	}
-	utf16.resize(utf16Length);
-	int result = ::MultiByteToWideChar(
-		CP_UTF8,
-		kFlags,
-		utf8.data(),
-		utf8Length,
-		&utf16[0],
-		utf16Length
-	);
-	return utf16;
-}
-
-#else
-
-#define ToWinString(x) x
-
-#endif
-
-template <typename DerivedType>
-class BaseWindow
-{
-public:
-	virtual ~BaseWindow() = default;
-
-	static LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
-	{
-		DerivedType* pThis = nullptr;
-		if (uMsg == WM_NCCREATE)
-		{
-			auto* pCreate = reinterpret_cast<CREATESTRUCT*>(lParam);
-			pThis = static_cast<DerivedType*>(pCreate->lpCreateParams);
-			SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pThis));
-			pThis->m_hwnd = hwnd;
-		}
-		else
-		{
-			pThis = reinterpret_cast<DerivedType*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
-		}
-		if (pThis)
-		{
-			return pThis->HandleMessage(uMsg, wParam, lParam);
-		}
-		return DefWindowProc(hwnd, uMsg, wParam, lParam);
-	}
-
-	BaseWindow() : m_hwnd(nullptr)
-	{
-	}
-
-	BOOL Create(
-		PCTSTR lpWindowName,
-		DWORD dwStyle,
-		DWORD dwExStyle = 0,
-		int x = CW_USEDEFAULT,
-		int y = CW_USEDEFAULT,
-		int nWidth = CW_USEDEFAULT,
-		int nHeight = CW_USEDEFAULT,
-		HWND hWndParent = nullptr,
-		HMENU hMenu = nullptr
-	)
-	{
-		WNDCLASS wc = {0};
-
-		wc.lpfnWndProc = DerivedType::WindowProc;
-		wc.hInstance = GetModuleHandle(nullptr);
-		wc.lpszClassName = ClassName();
-		wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-
-		RegisterClass(&wc);
-
-		m_hwnd = CreateWindowEx(
-			dwExStyle, ClassName(), lpWindowName, dwStyle, x, y,
-			nWidth, nHeight, hWndParent, hMenu, GetModuleHandle(nullptr), this
-		);
-
-		return (m_hwnd ? TRUE : FALSE);
-	}
-
-	HWND Window() const { return m_hwnd; }
-
-protected:
-	virtual PCTSTR ClassName() const = 0;
-	virtual LRESULT HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) = 0;
-
-	HWND m_hwnd;
-};
+#include "Base.h"
+#include "Print.h"
 
 class MainWindow final : public BaseWindow<MainWindow>
 {
@@ -125,15 +10,24 @@ public:
 	bool Throttle(UINT uMsg);
 
 protected:
-	HWND m_hwndEdit;
-	HWND m_hwndMotionEnabled;
+	HWND m_hwndEdit = nullptr;
+	HWND m_hwndTerse = nullptr;
+	HWND m_hwndThrottle = nullptr;
+	HWND m_hwndMotionEnabled = nullptr;
+	HWND m_hwndRetZeroOnWMPointer = nullptr;
 
+	bool m_terse = true;
+	bool m_throttle = false;
 	bool m_motionEnabled = false;
-	std::unordered_map<UINT, ULONGLONG> m_msgTickMap;
-	std::unordered_map<UINT, int> m_throttleCount;
+	bool m_returnZeroOnWMPointer = true;
+	std::unordered_map<UINT, ULONGLONG> m_msgTickMap{};
+	std::unordered_map<UINT, int> m_throttleCount{};
 
 	constexpr static int IDC_TEXTLOG = 100;
-	constexpr static int IDC_MOTIONENABLE = 101;
+	constexpr static int IDC_TERSE = 101;
+	constexpr static int IDC_THROTTLE = 102;
+	constexpr static int IDC_MOTIONENABLE = 103;
+	constexpr static int IDC_RETZPTR = 104;
 };
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow)
@@ -144,7 +38,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
 	EnableMouseInPointer(TRUE);
 	
 	MainWindow win{};
-	if (!win.Create(TEXT("WmPointer Demo"), WS_OVERLAPPEDWINDOW, 0, CW_USEDEFAULT, CW_USEDEFAULT, 640, 480))
+	if (!win.Create(TEXT("WmPointer Demo"), WS_OVERLAPPEDWINDOW, 0, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600))
 	{
 		MessageBox(HWND_DESKTOP, TEXT("Unable to create main window?"), TEXT("Fatal Error"), MB_OK | MB_ICONSTOP);
 		return 0;
@@ -161,73 +55,34 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
 	return 0;
 }
 
-#define ENUM_STR_START(name) std::string name##_STR(int val) { switch (val) { default: return fmt::format("{}", val)
-#define ENUM_STR_END() } }
-#define ENUM_STR_KEY(key) case key: return #key
-
-ENUM_STR_START(PDC);
-ENUM_STR_KEY(PDC_ARRIVAL);
-ENUM_STR_KEY(PDC_REMOVAL);
-ENUM_STR_KEY(PDC_ORIENTATION_0);
-ENUM_STR_KEY(PDC_ORIENTATION_90);
-ENUM_STR_KEY(PDC_ORIENTATION_180);
-ENUM_STR_KEY(PDC_ORIENTATION_270);
-ENUM_STR_KEY(PDC_MODE_DEFAULT);
-ENUM_STR_KEY(PDC_MODE_CENTERED);
-ENUM_STR_KEY(PDC_MAPPING_CHANGE);
-ENUM_STR_KEY(PDC_RESOLUTION);
-ENUM_STR_KEY(PDC_ORIGIN);
-ENUM_STR_KEY(PDC_MODE_ASPECTRATIOPRESERVED);
-ENUM_STR_END();
-
-#undef ENUM_STR_KEY
-#undef ENUM_STR_END
-#undef ENUM_STR_START
-
-constexpr std::string_view Btn(bool down)
-{
-	switch (down)
-	{
-	case true: return "X";
-	case false: return " ";
-	}
-}
-
-std::string PointerState(WPARAM wParam)
-{
-	const bool newPtr = IS_POINTER_NEW_WPARAM(wParam);
-	const bool inRange = IS_POINTER_INRANGE_WPARAM(wParam);
-	const bool inContact = IS_POINTER_INCONTACT_WPARAM(wParam);
-	const bool isPrimary = IS_POINTER_PRIMARY_WPARAM(wParam);
-	const bool b1 = IS_POINTER_FIRSTBUTTON_WPARAM(wParam);
-	const bool b2 = IS_POINTER_SECONDBUTTON_WPARAM(wParam);
-	const bool b3 = IS_POINTER_THIRDBUTTON_WPARAM(wParam);
-	const bool b4 = IS_POINTER_FOURTHBUTTON_WPARAM(wParam);
-	const bool b5 = IS_POINTER_FIFTHBUTTON_WPARAM(wParam);
-	return fmt::format("{} {} {} {} [{}|{}|{}|{}|{}]", newPtr ? "NEW" : "!NEW", inRange ? "INRANGE" : "!INRANGE", inContact ? "INCONTACT" : "!INCONTACT", isPrimary ? "PRIMARY" : "!PRIMARY", Btn(b1), Btn(b2), Btn(b3), Btn(b4), Btn(b5));
-}
-
 LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-#define MESSAGE_CASE(message) \
-	case message: \
-		if (this->Throttle(message)) { break; } \
-		this->Log(fmt::format("\r\n" #message "(wParam: {}, lParam: {})", wParam, lParam)); \
-		if (this->m_throttleCount[message] > 0) \
+#define MESSAGE_CASE(prefix, message) \
+	case prefix##_##message: \
+		if (this->m_throttle && this->Throttle(prefix##_##message)) { break; } \
+		if (!this->m_terse) this->Log(""); \
+		this->Log(fmt::format(#prefix "_" #message "(wParam: {}, lParam: {})", wParam, lParam)); \
+		if (this->m_throttleCount[prefix##_##message] > 0) \
 		{ \
-			this->Log(fmt::format("; (throttled {} previous " #message " messages)", this->m_throttleCount[message])); \
-			this->m_throttleCount.erase(message); \
+			this->Log(fmt::format("; (throttled {} previous " #prefix "_" #message " messages)", this->m_throttleCount[prefix##_##message])); \
+			this->m_throttleCount.erase(prefix##_##message); \
 		}
 
 #define LOG_DERIVED(derived, desc) \
-	this->Log(fmt::format("; - " #derived " = {}  " desc, derived))
+	if (!this->m_terse) this->Log(fmt::format("; - " #derived " = {}  " desc, derived))
 
 	if (!m_motionEnabled)
 	{
 		switch (uMsg)
 		{
-		case WM_NCPOINTERUPDATE:
 		case WM_POINTERUPDATE:
+			if (m_returnZeroOnWMPointer)
+			{
+				return 0;
+			}
+			// fallthrough
+		case WM_NCPOINTERUPDATE:
+		case WM_MOUSEMOVE:
 			return DefWindowProc(m_hwnd, uMsg, wParam, lParam);
 		}
 	}
@@ -238,12 +93,13 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 		{
 			RegisterPointerDeviceNotifications(m_hwnd, TRUE);
 			RegisterTouchWindow(m_hwnd, 0);
+			RegisterTouchHitTestingWindow(m_hwnd, TOUCH_HIT_TESTING_CLIENT);
 			
 			m_hwndEdit = CreateWindowEx(
 				0, 
 				TEXT("EDIT"),
 				nullptr,
-				WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_LEFT | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+				WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_LEFT | ES_MULTILINE | ES_READONLY | WS_DISABLED | ES_AUTOVSCROLL,
 				0, 
 				0, 
 				0, 
@@ -258,10 +114,42 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 			SendMessage(m_hwndEdit, WM_SETFONT, reinterpret_cast<WPARAM>(hFontConsolas), MAKELPARAM(TRUE, 0));
 			SendMessage(m_hwndEdit, EM_SETLIMITTEXT, 0, 0);
 
+			m_hwndTerse = CreateWindowEx(
+				0,
+				TEXT("BUTTON"),
+				TEXT("Terse"),
+				WS_CHILD | WS_VISIBLE | BS_CHECKBOX,
+				0,
+				0,
+				0,
+				0,
+				m_hwnd,
+				reinterpret_cast<HMENU>(IDC_TERSE),
+				reinterpret_cast<HINSTANCE>(GetWindowLongPtr(m_hwnd, GWLP_HINSTANCE)),
+				nullptr
+			);
+			Button_SetCheck(m_hwndTerse, m_terse);
+
+			m_hwndThrottle = CreateWindowEx(
+				0,
+				TEXT("BUTTON"),
+				TEXT("Throttle"),
+				WS_CHILD | WS_VISIBLE | BS_CHECKBOX,
+				0,
+				0,
+				0,
+				0,
+				m_hwnd,
+				reinterpret_cast<HMENU>(IDC_THROTTLE),
+				reinterpret_cast<HINSTANCE>(GetWindowLongPtr(m_hwnd, GWLP_HINSTANCE)),
+				nullptr
+			);
+			Button_SetCheck(m_hwndThrottle, m_throttle);
+
 			m_hwndMotionEnabled = CreateWindowEx(
 				0, 
 				TEXT("BUTTON"), 
-				TEXT("Enable Motion Events"), 
+				TEXT("Motion Events"), 
 				WS_CHILD | WS_VISIBLE | BS_CHECKBOX,
 				0,
 				0,
@@ -273,13 +161,37 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 				nullptr
 			);
 			Button_SetCheck(m_hwndMotionEnabled, m_motionEnabled);
+
+			m_hwndRetZeroOnWMPointer = CreateWindowEx(
+				0,
+				TEXT("BUTTON"),
+				TEXT("Ret 0 on WM_POINTER*"),
+				WS_CHILD | WS_VISIBLE | BS_CHECKBOX,
+				0,
+				0,
+				0,
+				0,
+				m_hwnd,
+				reinterpret_cast<HMENU>(IDC_RETZPTR),
+				reinterpret_cast<HINSTANCE>(GetWindowLongPtr(m_hwnd, GWLP_HINSTANCE)),
+				nullptr
+			);
+			Button_SetCheck(m_hwndRetZeroOnWMPointer, m_returnZeroOnWMPointer);
 		}
 		return 0;
 
 	case WM_SIZE:
 		{
-			MoveWindow(m_hwndEdit, 0, 0, LOWORD(lParam), HIWORD(lParam) / 2, TRUE);
-			MoveWindow(m_hwndMotionEnabled, 0, HIWORD(lParam) / 2, LOWORD(lParam), 40, TRUE);
+			const auto w = LOWORD(lParam), h = HIWORD(lParam);
+			const auto logH = h / 2;
+			
+			MoveWindow(m_hwndEdit, 0, 0, w, logH, TRUE);
+
+			const auto checkW = w / 4;
+			MoveWindow(m_hwndTerse, checkW * 0, logH, checkW, 40, TRUE);
+			MoveWindow(m_hwndThrottle, checkW * 1, logH, checkW, 40, TRUE);
+			MoveWindow(m_hwndMotionEnabled, checkW * 2, logH, checkW, 40, TRUE);
+			MoveWindow(m_hwndRetZeroOnWMPointer, checkW * 3, logH, checkW, 40, TRUE);
 		}
 		return 0;
 
@@ -301,17 +213,29 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 	case WM_COMMAND:
 		switch (wParam)
 		{
+		case IDC_TERSE:
+			m_terse = !m_terse;
+			Button_SetCheck(m_hwndTerse, m_terse);
+			break;
+		case IDC_THROTTLE:
+			m_throttle = !m_throttle;
+			Button_SetCheck(m_hwndThrottle, m_throttle);
+			break;
 		case IDC_MOTIONENABLE:
 			m_motionEnabled = !m_motionEnabled;
 			Button_SetCheck(m_hwndMotionEnabled, m_motionEnabled);
 			break;
+		case IDC_RETZPTR:
+			m_returnZeroOnWMPointer = !m_returnZeroOnWMPointer;
+			Button_SetCheck(m_hwndRetZeroOnWMPointer, m_returnZeroOnWMPointer);
+			break;
 		}
+		return 0;
+
+	MESSAGE_CASE(DM, POINTERHITTEST)
 		break;
 
-	MESSAGE_CASE(DM_POINTERHITTEST)
-		break;
-
-	MESSAGE_CASE(WM_NCPOINTERDOWN)
+	MESSAGE_CASE(WM, NCPOINTERDOWN)
 		{
 			LOG_DERIVED(GET_POINTERID_WPARAM(wParam), "pointer identifier");
 			LOG_DERIVED(HIWORD(wParam), "hit test value");
@@ -320,7 +244,7 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 		}
 		break;
 
-	MESSAGE_CASE(WM_NCPOINTERUP)
+	MESSAGE_CASE(WM, NCPOINTERUP)
 		{
 			LOG_DERIVED(GET_POINTERID_WPARAM(wParam), "pointer identifier");
 			LOG_DERIVED(HIWORD(wParam), "hit test value");
@@ -329,7 +253,7 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 		}
 		break;
 
-	MESSAGE_CASE(WM_NCPOINTERUPDATE)
+	MESSAGE_CASE(WM, NCPOINTERUPDATE)
 		{
 			LOG_DERIVED(GET_POINTERID_WPARAM(wParam), "pointer identifier");
 			LOG_DERIVED(HIWORD(wParam), "hit test value");
@@ -338,7 +262,7 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 		}
 		break;
 
-	MESSAGE_CASE(WM_POINTERACTIVATE)
+	MESSAGE_CASE(WM, POINTERACTIVATE)
 		{
 			LOG_DERIVED(GET_POINTERID_WPARAM(wParam), "pointer identifier");
 			LOG_DERIVED(HIWORD(wParam), "hit test value");
@@ -346,26 +270,26 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 		}
 		break;
 
-	MESSAGE_CASE(WM_POINTERCAPTURECHANGED)
+	MESSAGE_CASE(WM, POINTERCAPTURECHANGED)
 		{
 			LOG_DERIVED(GET_POINTERID_WPARAM(wParam), "pointer identifier");
 			LOG_DERIVED(lParam, "window capturing pointer");
 		}
 		break;
 
-	MESSAGE_CASE(WM_POINTERDEVICECHANGE)
+	MESSAGE_CASE(WM, POINTERDEVICECHANGE)
 		{
 			LOG_DERIVED(PDC_STR(wParam), "pointer identifier");
 		}
 		break;
 
-	MESSAGE_CASE(WM_POINTERDEVICEINRANGE)
+	MESSAGE_CASE(WM, POINTERDEVICEINRANGE)
 		break;
 
-	MESSAGE_CASE(WM_POINTERDEVICEOUTOFRANGE)
+	MESSAGE_CASE(WM, POINTERDEVICEOUTOFRANGE)
 		break;
 
-	MESSAGE_CASE(WM_POINTERDOWN)
+	MESSAGE_CASE(WM, POINTERDOWN)
 		{
 			LOG_DERIVED(GET_POINTERID_WPARAM(wParam), "pointer identifier");
 			LOG_DERIVED(PointerState(wParam), "pointer state");
@@ -374,22 +298,22 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 		}
 		break;
 
-	MESSAGE_CASE(WM_POINTERENTER)
+	MESSAGE_CASE(WM, POINTERENTER)
 		break;
 
-	MESSAGE_CASE(WM_POINTERLEAVE)
+	MESSAGE_CASE(WM, POINTERLEAVE)
 		break;
 
-	MESSAGE_CASE(WM_POINTERROUTEDAWAY)
+	MESSAGE_CASE(WM, POINTERROUTEDAWAY)
 		break;
 
-	MESSAGE_CASE(WM_POINTERROUTEDRELEASED)
+	MESSAGE_CASE(WM, POINTERROUTEDRELEASED)
 		break;
 
-	MESSAGE_CASE(WM_POINTERROUTEDTO)
+	MESSAGE_CASE(WM, POINTERROUTEDTO)
 		break;
 
-	MESSAGE_CASE(WM_POINTERUP)
+	MESSAGE_CASE(WM, POINTERUP)
 		{
 			LOG_DERIVED(GET_POINTERID_WPARAM(wParam), "pointer identifier");
 			LOG_DERIVED(PointerState(wParam), "pointer state");
@@ -398,7 +322,7 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 		}
 		break;
 
-	MESSAGE_CASE(WM_POINTERUPDATE)
+	MESSAGE_CASE(WM, POINTERUPDATE)
 		{
 			LOG_DERIVED(GET_POINTERID_WPARAM(wParam), "pointer identifier");
 			LOG_DERIVED(PointerState(wParam), "pointer state");
@@ -407,7 +331,7 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 		}
 		break;
 
-	MESSAGE_CASE(WM_POINTERWHEEL)
+	MESSAGE_CASE(WM, POINTERWHEEL)
 		{
 			LOG_DERIVED(GET_POINTERID_WPARAM(wParam), "pointer identifier");
 			LOG_DERIVED(GET_WHEEL_DELTA_WPARAM(wParam), "wheel delta");
@@ -416,7 +340,7 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 		}
 		break;
 
-	MESSAGE_CASE(WM_POINTERHWHEEL)
+	MESSAGE_CASE(WM, POINTERHWHEEL)
 		{
 			LOG_DERIVED(GET_POINTERID_WPARAM(wParam), "pointer identifier");
 			LOG_DERIVED(GET_WHEEL_DELTA_WPARAM(wParam), "wheel delta");
@@ -425,7 +349,7 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 		}
 		break;
 
-	MESSAGE_CASE(WM_TOUCHHITTESTING)
+	MESSAGE_CASE(WM, TOUCHHITTESTING)
 		{
 			const auto* info = reinterpret_cast<TOUCH_HIT_TESTING_INPUT*>(wParam);
 			LOG_DERIVED(info->pointerId, "pointer identifier");
@@ -433,14 +357,88 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 			LOG_DERIVED(info->point.y, "y coordinate");
 			LOG_DERIVED(info->orientation, "orientation");
 		}
-		break;
+		return 0;
 
+	MESSAGE_CASE(WM, MOUSEMOVE)
+		{
+			LOG_DERIVED(MouseState(wParam), "pointer state");
+			LOG_DERIVED(GET_X_LPARAM(lParam), "x coordinate");
+			LOG_DERIVED(GET_Y_LPARAM(lParam), "y coordinate");
+		}
+		return 0;
+
+	MESSAGE_CASE(WM, MOUSEWHEEL)
+		{
+			LOG_DERIVED(MouseState(wParam), "pointer state");
+			LOG_DERIVED(static_cast<SHORT> HIWORD(wParam), "wheel delta");
+			LOG_DERIVED(GET_X_LPARAM(lParam), "x coordinate");
+			LOG_DERIVED(GET_Y_LPARAM(lParam), "y coordinate");
+		}
+		return 0;
+
+	MESSAGE_CASE(WM, MOUSELEAVE)
+		return 0;
+
+	MESSAGE_CASE(WM, MOUSEACTIVATE)
+		{
+			LOG_DERIVED(wParam, "top level window");
+			LOG_DERIVED(GET_X_LPARAM(lParam), "x coordinate");
+			LOG_DERIVED(GET_Y_LPARAM(lParam), "y coordinate");
+		}
+		// Do *not* eat the event, so we can see that too.
+		return MA_ACTIVATE;
+
+#define MESSAGE_CASE_BUTTONEVENT(EVENT) \
+	MESSAGE_CASE(WM, EVENT) \
+		{ \
+			LOG_DERIVED(MouseState(wParam), "pointer state"); \
+			LOG_DERIVED(HIWORD(wParam), "x button"); \
+			LOG_DERIVED(GET_X_LPARAM(lParam), "x coordinate"); \
+			LOG_DERIVED(GET_Y_LPARAM(lParam), "y coordinate"); \
+		} \
+		return 0
+
+#define MESSAGE_CASE_BUTTONEVENTS(btn) \
+	MESSAGE_CASE_BUTTONEVENT(btn##BUTTONDBLCLK); \
+	MESSAGE_CASE_BUTTONEVENT(btn##BUTTONDOWN); \
+	MESSAGE_CASE_BUTTONEVENT(btn##BUTTONUP) \
+
+	MESSAGE_CASE_BUTTONEVENTS(R);
+	MESSAGE_CASE_BUTTONEVENTS(L);
+	MESSAGE_CASE_BUTTONEVENTS(M);
+	MESSAGE_CASE_BUTTONEVENTS(X);
+		
 	default:
 		break;
 	}
 
 #undef LOG_DERIVED
 #undef MESSAGE_CASE
+
+	if (m_returnZeroOnWMPointer)
+	{
+		switch (uMsg)
+		{
+		case WM_POINTERACTIVATE:
+		case WM_POINTERCAPTURECHANGED:
+		case WM_POINTERDEVICECHANGE:
+		case WM_POINTERDEVICEINRANGE:
+		case WM_POINTERDEVICEOUTOFRANGE:
+		case WM_POINTERDOWN:
+		case WM_POINTERENTER:
+		case WM_POINTERLEAVE:
+		case WM_POINTERROUTEDAWAY:
+		case WM_POINTERROUTEDRELEASED:
+		case WM_POINTERROUTEDTO:
+		case WM_POINTERUP:
+		case WM_POINTERUPDATE:
+		case WM_POINTERWHEEL:
+		case WM_POINTERHWHEEL:
+			return 0;
+		default:
+			break;
+		}
+	}
 
 	return DefWindowProc(m_hwnd, uMsg, wParam, lParam);
 }
