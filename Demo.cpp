@@ -8,6 +8,7 @@ public:
 	LRESULT HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam);
 	void Log(std::string_view Line) const;
 	bool Throttle(UINT uMsg);
+	void UpdateDPIDependentResources();
 
 protected:
 	HWND m_hwndEdit = nullptr;
@@ -16,6 +17,7 @@ protected:
 	HWND m_hwndMotionEnabled = nullptr;
 	HWND m_hwndRetZeroOnWMPointer = nullptr;
 
+	int m_dpi = 96;
 	bool m_terse = true;
 	bool m_throttle = false;
 	bool m_motionEnabled = false;
@@ -94,6 +96,19 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 			RegisterPointerDeviceNotifications(m_hwnd, TRUE);
 			RegisterTouchWindow(m_hwnd, 0);
 			RegisterTouchHitTestingWindow(m_hwnd, TOUCH_HIT_TESTING_CLIENT);
+
+			m_dpi = GetDpiForWindow(m_hwnd);
+
+			RECT wndRect;
+			GetWindowRect(m_hwnd, &wndRect);
+			MoveWindow(
+				m_hwnd,
+				wndRect.left,
+				wndRect.top,
+				MulDiv(wndRect.right - wndRect.left, m_dpi, USER_DEFAULT_SCREEN_DPI),
+				MulDiv(wndRect.bottom - wndRect.top, m_dpi, USER_DEFAULT_SCREEN_DPI),
+				TRUE
+			);
 			
 			m_hwndEdit = CreateWindowEx(
 				0, 
@@ -110,8 +125,6 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 				nullptr
 			);
 
-			HFONT hFontConsolas = CreateFont(18, 0, 0, 0, FW_DONTCARE, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, VARIABLE_PITCH, TEXT("Consolas"));
-			SendMessage(m_hwndEdit, WM_SETFONT, reinterpret_cast<WPARAM>(hFontConsolas), MAKELPARAM(TRUE, 0));
 			SendMessage(m_hwndEdit, EM_SETLIMITTEXT, 0, 0);
 
 			m_hwndTerse = CreateWindowEx(
@@ -177,6 +190,8 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 				nullptr
 			);
 			Button_SetCheck(m_hwndRetZeroOnWMPointer, m_returnZeroOnWMPointer);
+
+			UpdateDPIDependentResources();
 		}
 		return 0;
 
@@ -187,13 +202,33 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 			
 			MoveWindow(m_hwndEdit, 0, 0, w, logH, TRUE);
 
-			const auto checkW = w / 4;
-			MoveWindow(m_hwndTerse, checkW * 0, logH, checkW, 40, TRUE);
-			MoveWindow(m_hwndThrottle, checkW * 1, logH, checkW, 40, TRUE);
-			MoveWindow(m_hwndMotionEnabled, checkW * 2, logH, checkW, 40, TRUE);
-			MoveWindow(m_hwndRetZeroOnWMPointer, checkW * 3, logH, checkW, 40, TRUE);
+			const auto numChecks = 4;
+			const auto checkW = w / numChecks;
+			const auto checkH = MulDiv(40, m_dpi, USER_DEFAULT_SCREEN_DPI);
+			MoveWindow(m_hwndTerse, checkW * 0, logH, checkW, checkH, TRUE);
+			MoveWindow(m_hwndThrottle, checkW * 1, logH, checkW, checkH, TRUE);
+			MoveWindow(m_hwndMotionEnabled, checkW * 2, logH, checkW, checkH, TRUE);
+			MoveWindow(m_hwndRetZeroOnWMPointer, checkW * 3, logH, w - (checkW * (numChecks - 1)), checkH, TRUE);
 		}
 		return 0;
+
+	case WM_DPICHANGED:
+		{
+			m_dpi = HIWORD(wParam);
+			UpdateDPIDependentResources();
+
+			RECT* const newRect = reinterpret_cast<RECT*>(lParam);
+			SetWindowPos(
+				m_hwnd,
+				nullptr,
+				newRect->left,
+				newRect->top,
+				newRect->right - newRect->left,
+				newRect->bottom - newRect->top,
+				SWP_NOZORDER | SWP_NOACTIVATE
+			);
+			break;
+		}
 
 	case WM_DESTROY:
 		{
@@ -459,4 +494,18 @@ bool MainWindow::Throttle(UINT uMsg)
 	}
 	m_msgTickMap[uMsg] = currentTicks;
 	return false;
+}
+
+void MainWindow::UpdateDPIDependentResources()
+{
+	const int fontSize = MulDiv(18, m_dpi, USER_DEFAULT_SCREEN_DPI);
+
+	HFONT hFontConsolas = CreateFont(fontSize, 0, 0, 0, FW_DONTCARE, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, VARIABLE_PITCH, TEXT("Consolas"));
+	SendMessage(m_hwndEdit, WM_SETFONT, reinterpret_cast<WPARAM>(hFontConsolas), MAKELPARAM(TRUE, 0));
+
+	HFONT hFontCalibri = CreateFont(fontSize, 0, 0, 0, FW_DONTCARE, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, VARIABLE_PITCH, TEXT("Calibri"));
+	SendMessage(m_hwndTerse, WM_SETFONT, reinterpret_cast<WPARAM>(hFontCalibri), MAKELPARAM(TRUE, 0));
+	SendMessage(m_hwndThrottle, WM_SETFONT, reinterpret_cast<WPARAM>(hFontCalibri), MAKELPARAM(TRUE, 0));
+	SendMessage(m_hwndMotionEnabled, WM_SETFONT, reinterpret_cast<WPARAM>(hFontCalibri), MAKELPARAM(TRUE, 0));
+	SendMessage(m_hwndRetZeroOnWMPointer, WM_SETFONT, reinterpret_cast<WPARAM>(hFontCalibri), MAKELPARAM(TRUE, 0));
 }
