@@ -16,12 +16,14 @@ protected:
 	HWND m_hwndThrottle = nullptr;
 	HWND m_hwndMotionEnabled = nullptr;
 	HWND m_hwndRetZeroOnWMPointer = nullptr;
+	HWND m_hwndCallPromoteMouseInPointer = nullptr;
 
 	int m_dpi = 96;
 	bool m_terse = true;
 	bool m_throttle = false;
 	bool m_motionEnabled = false;
 	bool m_returnZeroOnWMPointer = true;
+	bool m_callPromoteMouseInPointer = false;
 	std::unordered_map<UINT, ULONGLONG> m_msgTickMap{};
 	std::unordered_map<UINT, int> m_throttleCount{};
 
@@ -30,6 +32,7 @@ protected:
 	constexpr static int IDC_THROTTLE = 102;
 	constexpr static int IDC_MOTIONENABLE = 103;
 	constexpr static int IDC_RETZPTR = 104;
+	constexpr static int IDC_CALLPROMOTE = 105;
 };
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow)
@@ -63,15 +66,22 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 	case prefix##_##message: \
 		if (this->m_throttle && this->Throttle(prefix##_##message)) { break; } \
 		if (!this->m_terse) this->Log(""); \
-		this->Log(fmt::format(#prefix "_" #message "(wParam: {}, lParam: {})", wParam, lParam)); \
+		this->Log(fmt::format(FMT_STRING(#prefix "_" #message "(wParam: {:#010x}, lParam: {:#010x})"), wParam, lParam)); \
 		if (this->m_throttleCount[prefix##_##message] > 0) \
 		{ \
-			this->Log(fmt::format("; (throttled {} previous " #prefix "_" #message " messages)", this->m_throttleCount[prefix##_##message])); \
+			this->Log(fmt::format(FMT_STRING("; (throttled {} previous " #prefix "_" #message " messages)"), this->m_throttleCount[prefix##_##message])); \
 			this->m_throttleCount.erase(prefix##_##message); \
 		}
 
 #define LOG_DERIVED(derived, desc) \
-	if (!this->m_terse) this->Log(fmt::format("; - " #derived " = {}  " desc, derived))
+	if (!this->m_terse) this->Log(fmt::format(FMT_STRING("; - " #derived " = {}  " desc), derived))
+
+	if (m_callPromoteMouseInPointer)
+	{
+		reinterpret_cast<int(__stdcall*)(int)>(GetProcAddress(GetModuleHandle(TEXT("win32u")), "NtUserPromoteMouseInPointer"))(0);
+		reinterpret_cast<int(__stdcall*)(int, int)>(GetProcAddress(GetModuleHandle(TEXT("win32u")), "NtUserPromotePointer"))(GET_POINTERID_WPARAM(wParam), MAKELONG(0, 0));
+		reinterpret_cast<int(__stdcall*)(int, int)>(GetProcAddress(GetModuleHandle(TEXT("win32u")), "NtUserPromotePointer"))(GET_POINTERID_WPARAM(wParam), MAKELONG(1, 1));
+	}
 
 	if (!m_motionEnabled)
 	{
@@ -191,6 +201,22 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 			);
 			Button_SetCheck(m_hwndRetZeroOnWMPointer, m_returnZeroOnWMPointer);
 
+			m_hwndCallPromoteMouseInPointer = CreateWindowEx(
+				0,
+				TEXT("BUTTON"),
+				TEXT("Call NtUserPromoteMouseInPointer"),
+				WS_CHILD | WS_VISIBLE | BS_CHECKBOX,
+				0,
+				0,
+				0,
+				0,
+				m_hwnd,
+				reinterpret_cast<HMENU>(IDC_CALLPROMOTE),
+				reinterpret_cast<HINSTANCE>(GetWindowLongPtr(m_hwnd, GWLP_HINSTANCE)),
+				nullptr
+			);
+			Button_SetCheck(m_hwndCallPromoteMouseInPointer, m_callPromoteMouseInPointer);
+
 			UpdateDPIDependentResources();
 		}
 		return 0;
@@ -202,13 +228,14 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 			
 			MoveWindow(m_hwndEdit, 0, 0, w, logH, TRUE);
 
-			const auto numChecks = 4;
+			const auto numChecks = 5;
 			const auto checkW = w / numChecks;
 			const auto checkH = MulDiv(40, m_dpi, USER_DEFAULT_SCREEN_DPI);
 			MoveWindow(m_hwndTerse, checkW * 0, logH, checkW, checkH, TRUE);
 			MoveWindow(m_hwndThrottle, checkW * 1, logH, checkW, checkH, TRUE);
 			MoveWindow(m_hwndMotionEnabled, checkW * 2, logH, checkW, checkH, TRUE);
-			MoveWindow(m_hwndRetZeroOnWMPointer, checkW * 3, logH, w - (checkW * (numChecks - 1)), checkH, TRUE);
+			MoveWindow(m_hwndRetZeroOnWMPointer, checkW * 3, logH, checkW, checkH, TRUE);
+			MoveWindow(m_hwndCallPromoteMouseInPointer, checkW * 4, logH, w - checkW * (numChecks - 1), checkH, TRUE);
 		}
 		return 0;
 
@@ -245,6 +272,176 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 		}
 		return 0;
 
+	case WM_KEYUP:
+		switch (wParam)
+		{
+		case '1':
+			{
+				HSYNTHETICPOINTERDEVICE d = CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_DEFAULT);
+				Log(fmt::format(FMT_STRING("Created synthetic pointer {}"), reinterpret_cast<void*>(d)));
+
+				POINTER_TYPE_INFO t{};
+				t.type = PT_PEN;
+				t.penInfo.pointerInfo.pointerType = PT_PEN;
+				t.penInfo.pointerInfo.pointerFlags = POINTER_FLAG_INRANGE | POINTER_FLAG_PRIMARY;
+				t.penInfo.pointerInfo.ptPixelLocation.x = 10;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 10;
+				t.penInfo.penFlags = PEN_FLAG_NONE;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				t.penInfo.pointerInfo.pointerFlags = POINTER_FLAG_INRANGE | POINTER_FLAG_PRIMARY;
+				t.penInfo.pointerInfo.ptPixelLocation.x = 20;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 20;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				t.penInfo.pointerInfo.pointerFlags = POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_FIRSTBUTTON | POINTER_FLAG_PRIMARY;
+				t.penInfo.pointerInfo.ButtonChangeType = POINTER_CHANGE_FIRSTBUTTON_DOWN;
+				t.penInfo.pointerInfo.ptPixelLocation.x = 50;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 50;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0x080;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				t.penInfo.pointerInfo.ptPixelLocation.x = 55;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 55;
+				t.penInfo.pointerInfo.ButtonChangeType = POINTER_CHANGE_NONE;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0x100;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				t.penInfo.pointerInfo.ptPixelLocation.x = 58;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 58;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0x180;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				t.penInfo.pointerInfo.ptPixelLocation.x = 60;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 60;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0x200;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				t.penInfo.pointerInfo.ptPixelLocation.x = 70;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 70;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0x280;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				t.penInfo.pointerInfo.ptPixelLocation.x = 80;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 80;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0x300;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				t.penInfo.pointerInfo.ptPixelLocation.x = 90;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 90;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0x380;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				t.penInfo.pointerInfo.ptPixelLocation.x = 100;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 100;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0x400;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				t.penInfo.pointerInfo.ptPixelLocation.x = 110;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 110;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0x380;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				t.penInfo.pointerInfo.ptPixelLocation.x = 120;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 120;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0x300;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				t.penInfo.pointerInfo.ptPixelLocation.x = 130;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 130;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0x280;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				t.penInfo.pointerInfo.ptPixelLocation.x = 140;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 140;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0x200;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				t.penInfo.pointerInfo.ptPixelLocation.x = 150;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 150;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0x180;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				t.penInfo.pointerInfo.ptPixelLocation.x = 160;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 160;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0x100;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				t.penInfo.pointerInfo.ptPixelLocation.x = 170;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 170;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0x080;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				t.penInfo.pointerInfo.pointerFlags = POINTER_FLAG_INRANGE | POINTER_FLAG_PRIMARY;
+				t.penInfo.pointerInfo.ButtonChangeType = POINTER_CHANGE_FIRSTBUTTON_UP;
+				t.penInfo.pointerInfo.ptPixelLocation.x = 180;
+				t.penInfo.pointerInfo.ptPixelLocation.y = 180;
+				t.penInfo.penFlags = PEN_FLAG_NONE;
+				t.penInfo.penMask = PEN_MASK_PRESSURE;
+				t.penInfo.pressure = 0;
+				InjectSyntheticPointerInput(d, &t, 1);
+
+				Sleep(100);
+
+				DestroySyntheticPointerDevice(d);
+				Log(fmt::format(FMT_STRING("Destroyed synthetic pointer {}"), reinterpret_cast<void*>(d)));
+			}
+		}
+		break;
+
 	case WM_COMMAND:
 		switch (wParam)
 		{
@@ -263,6 +460,10 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 		case IDC_RETZPTR:
 			m_returnZeroOnWMPointer = !m_returnZeroOnWMPointer;
 			Button_SetCheck(m_hwndRetZeroOnWMPointer, m_returnZeroOnWMPointer);
+			break;
+		case IDC_CALLPROMOTE:
+			m_callPromoteMouseInPointer = !m_callPromoteMouseInPointer;
+			Button_SetCheck(m_hwndCallPromoteMouseInPointer, m_callPromoteMouseInPointer);
 			break;
 		}
 		return 0;
@@ -385,7 +586,7 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 		break;
 
 	MESSAGE_CASE(WM, TOUCHHITTESTING)
-		{
+		if (wParam != 0) {
 			const auto* info = reinterpret_cast<TOUCH_HIT_TESTING_INPUT*>(wParam);
 			LOG_DERIVED(info->pointerId, "pointer identifier");
 			LOG_DERIVED(info->point.x, "x coordinate");
@@ -508,4 +709,5 @@ void MainWindow::UpdateDPIDependentResources()
 	SendMessage(m_hwndThrottle, WM_SETFONT, reinterpret_cast<WPARAM>(hFontCalibri), MAKELPARAM(TRUE, 0));
 	SendMessage(m_hwndMotionEnabled, WM_SETFONT, reinterpret_cast<WPARAM>(hFontCalibri), MAKELPARAM(TRUE, 0));
 	SendMessage(m_hwndRetZeroOnWMPointer, WM_SETFONT, reinterpret_cast<WPARAM>(hFontCalibri), MAKELPARAM(TRUE, 0));
+	SendMessage(m_hwndCallPromoteMouseInPointer, WM_SETFONT, reinterpret_cast<WPARAM>(hFontCalibri), MAKELPARAM(TRUE, 0));
 }
