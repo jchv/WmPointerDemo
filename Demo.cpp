@@ -1,11 +1,14 @@
 #include "Base.h"
 #include "Print.h"
+#include <unordered_map>
+#include <thread>
 
 class MainWindow final : public BaseWindow<MainWindow>
 {
 public:
 	PCTSTR ClassName() const { return TEXT("WmPointerDemo"); }
 	LRESULT HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam);
+	void InjectEvents() const;
 	void Log(std::string_view Line) const;
 	bool Throttle(UINT uMsg);
 	void UpdateDPIDependentResources();
@@ -17,6 +20,7 @@ protected:
 	HWND m_hwndMotionEnabled = nullptr;
 	HWND m_hwndRetZeroOnWMPointer = nullptr;
 	HWND m_hwndCallPromoteMouseInPointer = nullptr;
+	HWND m_hwndInject = nullptr;
 
 	int m_dpi = 96;
 	bool m_terse = true;
@@ -33,6 +37,7 @@ protected:
 	constexpr static int IDC_MOTIONENABLE = 103;
 	constexpr static int IDC_RETZPTR = 104;
 	constexpr static int IDC_CALLPROMOTE = 105;
+	constexpr static int IDC_INJECT = 106;
 };
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow)
@@ -217,6 +222,21 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 			);
 			Button_SetCheck(m_hwndCallPromoteMouseInPointer, m_callPromoteMouseInPointer);
 
+			m_hwndInject = CreateWindowEx(
+				0,
+				TEXT("BUTTON"),
+				TEXT("Inject"),
+				WS_CHILD | WS_VISIBLE,
+				0,
+				0,
+				0,
+				0,
+				m_hwnd,
+				reinterpret_cast<HMENU>(IDC_INJECT),
+				reinterpret_cast<HINSTANCE>(GetWindowLongPtr(m_hwnd, GWLP_HINSTANCE)),
+				nullptr
+			);
+
 			UpdateDPIDependentResources();
 		}
 		return 0;
@@ -228,7 +248,7 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 			
 			MoveWindow(m_hwndEdit, 0, 0, w, logH, TRUE);
 
-			const auto numChecks = 5;
+			const auto numChecks = 6;
 			const auto checkW = w / numChecks;
 			const auto checkH = MulDiv(40, m_dpi, USER_DEFAULT_SCREEN_DPI);
 			MoveWindow(m_hwndTerse, checkW * 0, logH, checkW, checkH, TRUE);
@@ -236,7 +256,8 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 			MoveWindow(m_hwndMotionEnabled, checkW * 2, logH, checkW, checkH, TRUE);
 			MoveWindow(m_hwndRetZeroOnWMPointer, checkW * 3, logH, checkW, checkH, TRUE);
 			MoveWindow(m_hwndCallPromoteMouseInPointer, checkW * 4, logH, w - checkW * (numChecks - 1), checkH, TRUE);
-		}
+			MoveWindow(m_hwndInject, checkW * 5, logH, w - checkW * (numChecks - 1), checkH, TRUE);
+	}
 		return 0;
 
 	case WM_DPICHANGED:
@@ -465,6 +486,9 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 			m_callPromoteMouseInPointer = !m_callPromoteMouseInPointer;
 			Button_SetCheck(m_hwndCallPromoteMouseInPointer, m_callPromoteMouseInPointer);
 			break;
+		case IDC_INJECT:
+			InjectEvents();
+			break;
 		}
 		return 0;
 
@@ -679,6 +703,59 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
 	return DefWindowProc(m_hwnd, uMsg, wParam, lParam);
 }
 
+typedef void (__stdcall * NtUserInitializePointerDeviceInjectionFn)(
+	POINTER_INPUT_TYPE       pointerType,
+	ULONG                    maxCount,
+	ULONG                    unknown,
+	POINTER_FEEDBACK_MODE    mode,
+	HSYNTHETICPOINTERDEVICE* out
+);
+
+typedef void(__stdcall* NtUserInjectPointerInputFn)(
+	HSYNTHETICPOINTERDEVICE  device,
+	const POINTER_TYPE_INFO* pointerInfo,
+	UINT32                   count
+);
+
+typedef void(__stdcall* NtUserRemoveInjectionDeviceFn)(
+	HSYNTHETICPOINTERDEVICE device
+);
+
+//NtUserInitializePointerDeviceInjection(pointerType, maxCount, 0, mode, &result);
+void MainWindow::InjectEvents() const
+{
+	std::thread t{ [&]() {
+		HSYNTHETICPOINTERDEVICE device{};
+		auto NtUserInitializePointerDeviceInjection = reinterpret_cast<NtUserInitializePointerDeviceInjectionFn>(GetProcAddress(GetModuleHandle(TEXT("win32u")), "NtUserInitializePointerDeviceInjection"));
+		auto NtUserInjectPointerInput = reinterpret_cast<NtUserInjectPointerInputFn>(GetProcAddress(GetModuleHandle(TEXT("win32u")), "NtUserInjectPointerInput"));
+		auto NtUserRemoveInjectionDevice = reinterpret_cast<NtUserRemoveInjectionDeviceFn>(GetProcAddress(GetModuleHandle(TEXT("win32u")), "NtUserRemoveInjectionDevice"));
+
+		NtUserInitializePointerDeviceInjection(PT_PEN, 1, 0, POINTER_FEEDBACK_DEFAULT, &device);
+		for (int i = 0; i < 50; i++) {
+			POINTER_TYPE_INFO inputInfo[1];
+			inputInfo[0].type = PT_PEN;
+			inputInfo[0].penInfo.pointerInfo.pointerType = PT_PEN;
+			inputInfo[0].penInfo.pointerInfo.pointerId = 0;
+			inputInfo[0].penInfo.pointerInfo.frameId = 0;
+			inputInfo[0].penInfo.pointerInfo.pointerFlags = POINTER_FLAG_INRANGE;
+			inputInfo[0].penInfo.penMask = PEN_MASK_PRESSURE | PEN_MASK_TILT_X | PEN_MASK_TILT_Y;
+			inputInfo[0].penInfo.pointerInfo.ptPixelLocation.x = 100 + i * 5;
+			inputInfo[0].penInfo.pointerInfo.ptPixelLocation.y = 100 + i * 5;
+			inputInfo[0].penInfo.pressure = 0;
+			inputInfo[0].penInfo.tiltX = 15;
+			inputInfo[0].penInfo.tiltY = -26;
+			inputInfo[0].penInfo.pointerInfo.dwTime = 0;
+			inputInfo[0].penInfo.pointerInfo.PerformanceCount = 0;
+			NtUserInjectPointerInput(device, inputInfo, 1);
+			Sleep(10);
+		}
+		NtUserRemoveInjectionDevice(device);
+
+		MessageBox(m_hwnd, TEXT("Done"), TEXT("Inject"), MB_OK | MB_ICONINFORMATION);
+	} };
+	t.detach();
+}
+
 void MainWindow::Log(std::string_view Line) const
 {
 	SendMessage(m_hwndEdit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(ToWinString(Line).c_str()));
@@ -710,4 +787,5 @@ void MainWindow::UpdateDPIDependentResources()
 	SendMessage(m_hwndMotionEnabled, WM_SETFONT, reinterpret_cast<WPARAM>(hFontCalibri), MAKELPARAM(TRUE, 0));
 	SendMessage(m_hwndRetZeroOnWMPointer, WM_SETFONT, reinterpret_cast<WPARAM>(hFontCalibri), MAKELPARAM(TRUE, 0));
 	SendMessage(m_hwndCallPromoteMouseInPointer, WM_SETFONT, reinterpret_cast<WPARAM>(hFontCalibri), MAKELPARAM(TRUE, 0));
+	SendMessage(m_hwndInject, WM_SETFONT, reinterpret_cast<WPARAM>(hFontCalibri), MAKELPARAM(TRUE, 0));
 }
