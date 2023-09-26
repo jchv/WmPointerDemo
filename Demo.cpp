@@ -721,7 +721,6 @@ typedef void(__stdcall* NtUserRemoveInjectionDeviceFn)(
 	HSYNTHETICPOINTERDEVICE device
 );
 
-//NtUserInitializePointerDeviceInjection(pointerType, maxCount, 0, mode, &result);
 void MainWindow::InjectEvents() const
 {
 	std::thread t{ [&]() {
